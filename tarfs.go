@@ -87,6 +87,15 @@ func (tf *tarFs) Open(name string) (http.File, error) {
 	return f, nil
 }
 
+func (tf *tarFs) Exists(name string) bool {
+	if filepath.Separator != '/' && strings.ContainsRune(name, filepath.Separator) ||
+		strings.Contains(name, "\x00") {
+		return false
+	}
+	_, ok := tf.files[path.Join("/", name)]
+	return ok
+}
+
 func (f *tarFsFile) Close() error {
 	return nil
 }
