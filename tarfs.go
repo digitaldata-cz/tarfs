@@ -18,6 +18,11 @@ type (
 		files map[string]*tarFsFile
 	}
 
+	FileSystem interface {
+		http.FileSystem
+		Exists(name string) bool
+	}
+
 	tarFsFile struct {
 		*bytes.Reader
 		data  []byte
@@ -27,7 +32,7 @@ type (
 )
 
 // NewFromFile returns an http.FileSystem that holds all the files in the tar, created from tar file
-func NewFromFile(tarFile string) (http.FileSystem, error) {
+func NewFromFile(tarFile string) (FileSystem, error) {
 	reader, err := os.Open(tarFile)
 	if err != nil {
 		return nil, err
@@ -37,13 +42,13 @@ func NewFromFile(tarFile string) (http.FileSystem, error) {
 }
 
 // NewFromReader returns an http.FileSystem that holds all the files in the tar, created from io.Reader
-func NewFromReader(reader io.Reader) (http.FileSystem, error) {
+func NewFromReader(reader io.Reader) (FileSystem, error) {
 	return newFS(reader)
 }
 
-func newFS(reader io.Reader) (http.FileSystem, error) {
+func newFS(reader io.Reader) (FileSystem, error) {
 	tarReader := tar.NewReader(reader)
-	tarFs := tarFs{make(map[string]*tarFsFile)}
+	tarFs := tarFs{files: make(map[string]*tarFsFile)}
 	for {
 		fileHeader, err := tarReader.Next()
 		if err == io.EOF {
