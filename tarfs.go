@@ -64,6 +64,7 @@ func newFS(reader io.Reader) (http.FileSystem, error) {
 	return &tarFs, nil
 }
 
+// Open file in tarfs and returns file handle
 func (tf *tarFs) Open(name string) (http.File, error) {
 	if filepath.Separator != '/' && strings.ContainsRune(name, filepath.Separator) ||
 		strings.Contains(name, "\x00") {
@@ -87,6 +88,7 @@ func (tf *tarFs) Open(name string) (http.File, error) {
 	return f, nil
 }
 
+// Check if file exists in tarfs
 func (tf *tarFs) Exists(name string) bool {
 	if filepath.Separator != '/' && strings.ContainsRune(name, filepath.Separator) ||
 		strings.Contains(name, "\x00") {
@@ -96,10 +98,12 @@ func (tf *tarFs) Exists(name string) bool {
 	return ok
 }
 
+// Close file handle
 func (f *tarFsFile) Close() error {
 	return nil
 }
 
+// Readdir
 func (f *tarFsFile) Readdir(count int) ([]os.FileInfo, error) {
 	if f.fi.IsDir() && f.files != nil {
 		return f.files, nil
@@ -107,6 +111,7 @@ func (f *tarFsFile) Readdir(count int) ([]os.FileInfo, error) {
 	return nil, os.ErrNotExist
 }
 
+// Stat
 func (f *tarFsFile) Stat() (os.FileInfo, error) {
 	return f.fi, nil
 }
