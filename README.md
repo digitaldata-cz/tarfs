@@ -3,9 +3,11 @@
 [![CodeQL](https://github.com/digitaldata-cz/tarfs/actions/workflows/codeql-analysis.yml/badge.svg)](https://github.com/digitaldata-cz/tarfs/actions/workflows/codeql-analysis.yml)
 
 # tarfs
+
 In-memory http.FileSystem from tar archives.
 
-### Usage
+## Usage
 
-### LICENSE
+## LICENSE
+
   [MIT](LICENSE).
