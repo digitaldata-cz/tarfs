@@ -3,6 +3,7 @@ package tarfs
 import (
 	"archive/tar"
 	"bytes"
+	"compress/bzip2"
 	"compress/gzip"
 	"errors"
 	"io"
@@ -54,6 +55,17 @@ func NewFromGzipFile(tgzFile string) (FileSystem, error) {
 		return nil, err
 	}
 	defer reader.Close()
+	return newFS(reader)
+}
+
+// NewFromBzip2File returns an http.FileSystem that holds all the files in the tar.bz2, created from file
+func NewFromBzip2File(tbz2File string) (FileSystem, error) {
+	fileReader, err := os.Open(tbz2File)
+	if err != nil {
+		return nil, err
+	}
+	defer fileReader.Close()
+	reader := bzip2.NewReader(fileReader)
 	return newFS(reader)
 }
 
