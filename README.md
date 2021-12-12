@@ -10,4 +10,4 @@ In-memory http.FileSystem from tar archives.
 
 ## LICENSE
 
-  [MIT](LICENSE).
+  [MIT](LICENSE)
