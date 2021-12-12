@@ -12,33 +12,33 @@ In-memory http.FileSystem from tar archives.
 package main
 
 import (
-	"net/http"
+  "net/http"
 
-	"github.com/digitaldata-cz/tarfs"
-	"github.com/gin-gonic/gin"
+  "github.com/digitaldata-cz/tarfs"
+  "github.com/gin-gonic/gin"
 )
 
 func main() {
 
-	// load web archive
-	web, err := tarfs.NewFromBzip2File("web.tbz2")
-	if err != nil {
-		panic(err)
-	}
+  // load web archive
+  web, err := tarfs.NewFromBzip2File("web.tbz2")
+  if err != nil {
+    panic(err)
+  }
 
-	r := gin.Default()
+  r := gin.Default()
 
-	// If there is no defined route, try to serve static file
-	r.NoRoute(func(c *gin.Context) {
-		http.FileServer(web).ServeHTTP(c.Writer, c.Request)
-	})
+  // If there is no defined route, try to serve static file
+  r.NoRoute(func(c *gin.Context) {
+    http.FileServer(web).ServeHTTP(c.Writer, c.Request)
+  })
 
-	// Example api call
-	r.GET("/ping", func(c *gin.Context) {
-		c.String(200, "Pong!")
-	})
+  // Example api call
+  r.GET("/ping", func(c *gin.Context) {
+    c.String(200, "Pong!")
+  })
 
-	r.Run() // listen and serve on
+  r.Run() // listen and serve on
 }
 ```
 
