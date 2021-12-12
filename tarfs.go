@@ -43,8 +43,8 @@ func NewFromFile(tarFile string) (FileSystem, error) {
 }
 
 // NewFromGzipFile returns an http.FileSystem that holds all the files in the tar.gz, created from file
-func NewFromGzipFile(tarFile string) (FileSystem, error) {
-	fileReader, err := os.Open(tarFile)
+func NewFromGzipFile(tgzFile string) (FileSystem, error) {
+	fileReader, err := os.Open(tgzFile)
 	if err != nil {
 		return nil, err
 	}
