@@ -3,6 +3,7 @@ package tarfs
 import (
 	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"errors"
 	"io"
 	"io/ioutil"
@@ -31,9 +32,24 @@ type (
 	}
 )
 
-// NewFromFile returns an http.FileSystem that holds all the files in the tar, created from tar file
+// NewFromFile returns an http.FileSystem that holds all the files in the tar, created from file
 func NewFromFile(tarFile string) (FileSystem, error) {
 	reader, err := os.Open(tarFile)
+	if err != nil {
+		return nil, err
+	}
+	defer reader.Close()
+	return newFS(reader)
+}
+
+// NewFromGzipFile returns an http.FileSystem that holds all the files in the tar.gz, created from file
+func NewFromGzipFile(tarFile string) (FileSystem, error) {
+	fileReader, err := os.Open(tarFile)
+	if err != nil {
+		return nil, err
+	}
+	defer fileReader.Close()
+	reader, err := gzip.NewReader(fileReader)
 	if err != nil {
 		return nil, err
 	}
