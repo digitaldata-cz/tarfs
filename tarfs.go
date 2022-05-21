@@ -28,7 +28,7 @@ type (
 	tarFsFile struct {
 		*bytes.Reader
 		data  []byte
-		fi    os.FileInfo
+		file  os.FileInfo
 		files []os.FileInfo
 	}
 )
@@ -91,7 +91,7 @@ func newFS(reader io.Reader) (FileSystem, error) {
 		}
 		tarFs.files[path.Join("/", fileHeader.Name)] = &tarFsFile{
 			data: data,
-			fi:   fileHeader.FileInfo(),
+			file: fileHeader.FileInfo(),
 		}
 	}
 	return &tarFs, nil
@@ -107,7 +107,7 @@ func (tf *tarFs) Open(name string) (http.File, error) {
 	if !ok {
 		return nil, os.ErrNotExist
 	}
-	if f.fi.IsDir() {
+	if f.file.IsDir() {
 		f.files = []os.FileInfo{}
 		for path, tarFsFile := range tf.files {
 			if strings.HasPrefix(path, name) {
@@ -138,7 +138,7 @@ func (f *tarFsFile) Close() error {
 
 // Readdir
 func (f *tarFsFile) Readdir(count int) ([]os.FileInfo, error) {
-	if f.fi.IsDir() && f.files != nil {
+	if f.file.IsDir() && f.files != nil {
 		return f.files, nil
 	}
 	return nil, os.ErrNotExist
@@ -146,5 +146,5 @@ func (f *tarFsFile) Readdir(count int) ([]os.FileInfo, error) {
 
 // Stat
 func (f *tarFsFile) Stat() (os.FileInfo, error) {
-	return f.fi, nil
+	return f.file, nil
 }
