@@ -3,7 +3,7 @@ package tarfs
 import (
 	"archive/tar"
 	"bytes"
-	"io/ioutil"
+	"io"
 	"log"
 	"os"
 	"testing"
@@ -67,7 +67,7 @@ func TestOpen(t *testing.T) {
 	if err := tw.Close(); err != nil {
 		log.Fatalln(err)
 	}
-	f, err := ioutil.TempFile("", "tarfs_")
+	f, err := os.CreateTemp("", "tarfs_")
 	if err != nil {
 		log.Fatalln(err.Error())
 	}
@@ -99,7 +99,7 @@ func TestOpen(t *testing.T) {
 			if err != nil {
 				t.Fatal(err.Error())
 			}
-			content, _ := ioutil.ReadAll(f)
+			content, _ := io.ReadAll(f)
 			if string(content) != file.Body {
 				t.Fatalf("For '%s'\nExpected:\n%s\nGot:\n%s\n", file.Name, file.Body, content)
 			}

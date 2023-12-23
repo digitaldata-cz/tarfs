@@ -27,5 +27,9 @@ func main() {
 		c.String(200, "Pong!")
 	})
 
-	r.Run() // listen and serve on
+	err = r.Run() // listen and serve on
+	if err != nil {
+		panic(err)
+	}
+
 }

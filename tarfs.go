@@ -7,7 +7,6 @@ import (
 	"compress/gzip"
 	"errors"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"os"
 	"path"
@@ -35,7 +34,7 @@ type (
 
 // NewFromFile returns an http.FileSystem that holds all the files in the tar, created from file
 func NewFromFile(tarFile string) (FileSystem, error) {
-	reader, err := os.Open(tarFile)
+	reader, err := os.Open(tarFile) // #nosec G304
 	if err != nil {
 		return nil, err
 	}
@@ -45,7 +44,7 @@ func NewFromFile(tarFile string) (FileSystem, error) {
 
 // NewFromGzipFile returns an http.FileSystem that holds all the files in the tar.gz, created from file
 func NewFromGzipFile(tgzFile string) (FileSystem, error) {
-	fileReader, err := os.Open(tgzFile)
+	fileReader, err := os.Open(tgzFile) // #nosec G304
 	if err != nil {
 		return nil, err
 	}
@@ -60,7 +59,7 @@ func NewFromGzipFile(tgzFile string) (FileSystem, error) {
 
 // NewFromBzip2File returns an http.FileSystem that holds all the files in the tar.bz2, created from file
 func NewFromBzip2File(tbz2File string) (FileSystem, error) {
-	fileReader, err := os.Open(tbz2File)
+	fileReader, err := os.Open(tbz2File) // #nosec G304
 	if err != nil {
 		return nil, err
 	}
@@ -85,13 +84,19 @@ func newFS(reader io.Reader) (FileSystem, error) {
 		if err != nil {
 			return nil, err
 		}
-		data, err := ioutil.ReadAll(tarReader)
+		data, err := io.ReadAll(tarReader)
 		if err != nil {
 			return nil, err
 		}
-		tarFs.files[path.Join("/", fileHeader.Name)] = &tarFsFile{
-			data: data,
-			file: fileHeader.FileInfo(),
+		if fileHeader.Name == "." {
+			continue
+		}
+		// Skip non regular files and directories
+		if fileHeader.Typeflag == tar.TypeReg || fileHeader.Typeflag == tar.TypeDir {
+			tarFs.files[path.Join("/", fileHeader.Name)] = &tarFsFile{
+				data: data,
+				file: fileHeader.FileInfo(),
+			}
 		}
 	}
 	return &tarFs, nil
