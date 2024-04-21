@@ -93,7 +93,6 @@ func newFS(reader io.Reader) (FileSystem, error) {
 		}
 		// Skip non regular files and directories
 		if fileHeader.Typeflag == tar.TypeReg || fileHeader.Typeflag == tar.TypeDir {
-
 			tarFs.files[path.Join("/", filepath.Clean(fileHeader.Name))] = &tarFsFile{
 				data: data,
 				file: fileHeader.FileInfo(),
