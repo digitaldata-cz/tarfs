@@ -1,1 +1,21 @@
+# macOS
 .DS_Store
+
+# Go test coverage
+coverage.out
+coverage.html
+*.coverprofile
+
+# Go build artifacts
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary
+*.test
+
+# Go workspace file (optional - some prefer to commit it)
+# go.work
+# go.work.sum

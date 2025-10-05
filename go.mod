@@ -1,3 +1,3 @@
 module github.com/digitaldata-cz/tarfs
 
-go 1.16
+go 1.22
