@@ -29,7 +29,12 @@ jobs:
           cache: false
       - name: Format
         shell: bash
-        run: test -z "$(gofmt -l .)"
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            printf '%s\n' "$unformatted"
+            exit 1
+          fi
       - run: go vet ./...
       - run: go test -race -shuffle=on -count=1 -coverprofile=coverage.out ./...
       - name: Benchmark smoke test
