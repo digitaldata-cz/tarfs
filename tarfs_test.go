@@ -4,8 +4,8 @@ import (
 	"archive/tar"
 	"bytes"
 	"io"
-	"log"
 	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -52,66 +52,45 @@ func TestOpen(t *testing.T) {
 			},
 		},
 	}
+
 	for _, file := range files {
-		hdr := &tar.Header{
-			Name: file.Name,
-			Size: int64(len(file.Body)),
-		}
-		if err := tw.WriteHeader(hdr); err != nil {
-			log.Fatalln(err.Error())
+		if err := tw.WriteHeader(&tar.Header{Name: file.Name, Size: int64(len(file.Body))}); err != nil {
+			t.Fatal(err)
 		}
 		if _, err := tw.Write([]byte(file.Body)); err != nil {
-			log.Fatalln(err.Error())
+			t.Fatal(err)
 		}
 	}
 	if err := tw.Close(); err != nil {
-		log.Fatalln(err)
+		t.Fatal(err)
 	}
-	f, err := os.CreateTemp("", "tarfs_")
+	archivePath := filepath.Join(t.TempDir(), "archive.tar")
+	if err := os.WriteFile(archivePath, buf.Bytes(), 0600); err != nil {
+		t.Fatal(err)
+	}
+	filesystem, err := NewFromFile(archivePath)
 	if err != nil {
-		log.Fatalln(err.Error())
+		t.Fatal(err)
 	}
-	_, err = f.Write(buf.Bytes())
-	if err != nil {
-		log.Fatalln(err.Error())
-	}
-	err = f.Close()
-	if err != nil {
-		log.Fatalln(err.Error())
-	}
-	defer func() {
-		err = os.Remove(f.Name())
-		if err != nil {
-			log.Fatalln(err.Error())
-		}
-	}()
-
-	// Open the tar archive for reading.
-	fs, err := NewFromFile(f.Name())
-	if err != nil {
-		t.Fatal(err.Error())
-	}
-
-	// Test files in archive
 	for _, file := range files {
-		for _, path := range file.AccessNames {
-			f, err := fs.Open(path)
+		for _, name := range file.AccessNames {
+			handle := openTestFile(t, filesystem, name)
+			content, err := io.ReadAll(handle)
 			if err != nil {
-				t.Fatal(err.Error())
+				t.Fatal(err)
 			}
-			content, _ := io.ReadAll(f)
 			if string(content) != file.Body {
-				t.Fatalf("For '%s'\nExpected:\n%s\nGot:\n%s\n", file.Name, file.Body, content)
+				t.Fatalf("%q: content %q, want %q", name, content, file.Body)
 			}
-
-			var (
-				s, _ = f.Stat()
-				size = int64(len(file.Body))
-				got  = s.Size()
-			)
-
-			if size != got {
-				t.Fatalf("For '%s'\nExpected Size:\n%v\nGot:\n%v\n", file.Name, size, got)
+			info, err := handle.Stat()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info.Size() != int64(len(file.Body)) {
+				t.Fatalf("%q: size %d, want %d", name, info.Size(), len(file.Body))
+			}
+			if err := handle.Close(); err != nil {
+				t.Fatal(err)
 			}
 		}
 	}

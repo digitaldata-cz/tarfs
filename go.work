@@ -1,5 +1,7 @@
-go 1.22
+go 1.26.0
 
-use .
-
-use ./examples/gin
+use (
+	.
+	./examples/gin
+	./examples/gin-advanced
+)

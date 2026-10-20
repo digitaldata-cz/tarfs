@@ -1,541 +1,436 @@
-// Package tarfs provides a virtual filesystem implementation for TAR archives.
-// It implements http.FileSystem interface, making it ideal for embedding static
-// files (web assets, documentation) into Go applications.
-//
-// Features:
-//   - Memory-efficient: Custom lightweight metadata storage
-//   - Thread-safe: Safe for concurrent reads
-//   - Fast directory listings: O(1) access via pre-computed maps
-//   - Automatic parent directory creation
-//
-// Example usage:
-//
-//	fs, err := tarfs.NewFromBzip2File("web.tbz2")
-//	if err != nil {
-//	    log.Fatal(err)
-//	}
-//	http.Handle("/", http.FileServer(fs))
-//
-// Performance characteristics:
-//   - Open: ~90 ns/op, 128 B/op
-//   - Readdir: ~1500 ns/op (O(1) complexity)
-//   - Memory overhead: ~180 bytes per file
+// Package tarfs loads TAR archives into an immutable, in-memory HTTP filesystem.
+// A filesystem can be shared between requests. Each Open returns an independent
+// handle; operations on a handle are serialized. No files are extracted to disk.
 package tarfs
 
 import (
 	"archive/tar"
+	"bytes"
 	"compress/bzip2"
 	"compress/gzip"
-	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"net/http"
 	"os"
 	"path"
-	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 )
 
-type (
-	// tarFs is the main filesystem structure that holds all files from a TAR archive.
-	// It implements http.FileSystem interface for use with HTTP servers.
-	// Thread-safe for concurrent read operations.
-	tarFs struct {
-		files       map[string]*tarFsFile // Map of file paths to file entries
-		dirs        map[string][]string   // Pre-computed directory listings for O(1) access
-		mu          sync.RWMutex          // Mutex for thread-safe concurrent access
-		config      *Config               // Configuration options
-		cache       *arcCache             // ARC cache for on-demand loading
-		archivePath string                // Path to archive (for lazy loading)
-		isGzip      bool                  // Archive is gzipped
-		isBzip2     bool                  // Archive is bzipped
-		preloaded   map[string]bool       // Map of preloaded files (bypass cache)
-	}
-
-	// FileSystem extends http.FileSystem with an Exists method for checking file presence.
-	FileSystem interface {
-		http.FileSystem
-		Exists(name string) bool
-	}
-
-	// tarFsFile represents a single file or directory in the TAR filesystem.
-	// Each Open() call creates a new instance to avoid race conditions.
-	tarFsFile struct {
-		fs         *tarFs          // Reference to parent filesystem
-		data       []byte          // File contents (nil for directories or cached files)
-		compressed *compressedData // Compressed data (if compression enabled)
-		fileInfo   *tarFileInfo    // File metadata
-		dirPos     int             // Current position for Readdir pagination
-		readPos    int             // Current position for Read operations
-		isDir      bool            // Whether this is a directory
-		name       string          // Full path of the file
-		cached     bool            // Whether this file uses cache
-	}
-
-	// tarFileInfo is a lightweight implementation of fs.FileInfo.
-	// Stores only essential metadata to minimize memory usage.
-	tarFileInfo struct {
-		name    string
-		size    int64
-		mode    fs.FileMode
-		modTime time.Time
-		isDir   bool
-	}
-)
-
-// Implement fs.FileInfo interface for tarFileInfo
-func (tfi *tarFileInfo) Name() string       { return tfi.name }
-func (tfi *tarFileInfo) Size() int64        { return tfi.size }
-func (tfi *tarFileInfo) Mode() fs.FileMode  { return tfi.mode }
-func (tfi *tarFileInfo) ModTime() time.Time { return tfi.modTime }
-func (tfi *tarFileInfo) IsDir() bool        { return tfi.isDir }
-func (tfi *tarFileInfo) Sys() interface{}   { return nil }
-
-// NewFromFile returns an http.FileSystem that holds all the files in the tar, created from file
-// Uses default configuration (no compression, no caching)
-func NewFromFile(tarFile string) (FileSystem, error) {
-	return NewFromFileWithConfig(tarFile, DefaultConfig())
+// FileSystem extends http.FileSystem with a file/directory presence check.
+type FileSystem interface {
+	http.FileSystem
+	Exists(name string) bool
 }
 
-// NewFromFileWithConfig returns an http.FileSystem with custom configuration
-func NewFromFileWithConfig(tarFile string, config *Config) (FileSystem, error) {
-	reader, err := os.Open(tarFile) // #nosec G304
+// Indexes and payloads are immutable; handle cursors and decoded-cache state
+// are synchronized separately.
+type tarFs struct {
+	files map[string]*fileEntry
+	dirs  map[string][]os.FileInfo
+	cache *arcCache
+}
+
+type fileEntry struct {
+	data       []byte
+	compressed *compressedData
+	fileInfo   *tarFileInfo
+}
+
+// Only the handle owns the reader, directory cursor and closed state.
+type tarFsFile struct {
+	mu     sync.Mutex
+	fs     *tarFs
+	entry  *fileEntry
+	reader bytes.Reader
+	name   string
+	dirPos int
+	loaded bool
+	closed bool
+}
+
+type tarFileInfo struct {
+	name    string
+	size    int64
+	mode    fs.FileMode
+	modTime time.Time
+}
+
+func (info *tarFileInfo) Name() string       { return info.name }
+func (info *tarFileInfo) Size() int64        { return info.size }
+func (info *tarFileInfo) Mode() fs.FileMode  { return info.mode }
+func (info *tarFileInfo) ModTime() time.Time { return info.modTime }
+func (info *tarFileInfo) IsDir() bool        { return info.mode.IsDir() }
+func (info *tarFileInfo) Sys() any           { return nil }
+
+// NewFromFile loads an uncompressed TAR archive with the default configuration.
+func NewFromFile(name string) (FileSystem, error) {
+	return NewFromFileWithConfig(name, nil)
+}
+
+// NewFromFileWithConfig loads an uncompressed TAR archive. The file is closed
+// before this function returns; subsequent reads never reopen the archive.
+func NewFromFileWithConfig(name string, config *Config) (FileSystem, error) {
+	file, err := os.Open(name) // #nosec G304 -- caller explicitly selects the archive.
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	return newFSWithConfig(file, config)
+}
+
+// NewFromGzipFile loads a gzip-compressed TAR archive with the default configuration.
+func NewFromGzipFile(name string) (FileSystem, error) {
+	return NewFromGzipFileWithConfig(name, nil)
+}
+
+// NewFromGzipFileWithConfig loads a gzip-compressed TAR archive and verifies the
+// complete gzip stream, including its checksum and trailer.
+func NewFromGzipFileWithConfig(name string, config *Config) (FileSystem, error) {
+	file, err := os.Open(name) // #nosec G304 -- caller explicitly selects the archive.
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	reader, err := gzip.NewReader(file)
 	if err != nil {
 		return nil, err
 	}
 	defer reader.Close()
-	return newFSWithConfig(reader, tarFile, false, false, config)
+	return loadCompressedArchive(reader, config)
 }
 
-// NewFromGzipFile returns an http.FileSystem that holds all the files in the tar.gz, created from file
-// Uses default configuration (no compression, no caching)
-func NewFromGzipFile(tgzFile string) (FileSystem, error) {
-	return NewFromGzipFileWithConfig(tgzFile, DefaultConfig())
+// NewFromBzip2File loads a bzip2-compressed TAR archive with the default configuration.
+func NewFromBzip2File(name string) (FileSystem, error) {
+	return NewFromBzip2FileWithConfig(name, nil)
 }
 
-// NewFromGzipFileWithConfig returns an http.FileSystem with custom configuration
-func NewFromGzipFileWithConfig(tgzFile string, config *Config) (FileSystem, error) {
-	fileReader, err := os.Open(tgzFile) // #nosec G304
+// NewFromBzip2FileWithConfig loads and verifies a bzip2-compressed TAR archive.
+func NewFromBzip2FileWithConfig(name string, config *Config) (FileSystem, error) {
+	file, err := os.Open(name) // #nosec G304 -- caller explicitly selects the archive.
 	if err != nil {
 		return nil, err
 	}
-	defer fileReader.Close()
-	reader, err := gzip.NewReader(fileReader)
+	defer file.Close()
+	return loadCompressedArchive(bzip2.NewReader(file), config)
+}
+
+// TAR ends before the surrounding compression stream. Reading to its end is
+// necessary to detect a truncated trailer or checksum failure.
+func loadCompressedArchive(reader io.Reader, config *Config) (FileSystem, error) {
+	filesystem, err := newFSWithConfig(reader, config)
 	if err != nil {
 		return nil, err
 	}
-	defer reader.Close()
-	return newFSWithConfig(reader, tgzFile, true, false, config)
-}
-
-// NewFromBzip2File returns an http.FileSystem that holds all the files in the tar.bz2, created from file
-// Uses default configuration (no compression, no caching)
-func NewFromBzip2File(tbz2File string) (FileSystem, error) {
-	return NewFromBzip2FileWithConfig(tbz2File, DefaultConfig())
-}
-
-// NewFromBzip2FileWithConfig returns an http.FileSystem with custom configuration
-func NewFromBzip2FileWithConfig(tbz2File string, config *Config) (FileSystem, error) {
-	fileReader, err := os.Open(tbz2File) // #nosec G304
-	if err != nil {
-		return nil, err
+	if _, err := io.Copy(io.Discard, reader); err != nil {
+		return nil, fmt.Errorf("tarfs: finish compressed archive: %w", err)
 	}
-	defer fileReader.Close()
-	reader := bzip2.NewReader(fileReader)
-	return newFSWithConfig(reader, tbz2File, false, true, config)
+	return filesystem, nil
 }
 
-// NewFromReader returns an http.FileSystem that holds all the files in the tar, created from io.Reader
-// Uses default configuration (no compression, no caching)
+// NewFromReader loads a TAR archive with the default configuration. It does not
+// close reader. The reader is no longer needed after this function returns.
 func NewFromReader(reader io.Reader) (FileSystem, error) {
-	return newFSWithConfig(reader, "", false, false, DefaultConfig())
+	return NewFromReaderWithConfig(reader, nil)
 }
 
-// NewFromReaderWithConfig returns an http.FileSystem with custom configuration
+// NewFromReaderWithConfig loads a TAR archive without taking ownership of reader.
+// A nil configuration selects DefaultConfig. A zero Config disables compression
+// and caching. Invalid settings fail construction, even for an empty archive.
 func NewFromReaderWithConfig(reader io.Reader, config *Config) (FileSystem, error) {
-	return newFSWithConfig(reader, "", false, false, config)
+	return newFSWithConfig(reader, config)
 }
 
-func newFSWithConfig(reader io.Reader, archivePath string, isGzip, isBzip2 bool, config *Config) (FileSystem, error) {
+func newFSWithConfig(reader io.Reader, config *Config) (FileSystem, error) {
+	if reader == nil {
+		return nil, fmt.Errorf("tarfs: nil archive reader: %w", fs.ErrInvalid)
+	}
 	if config == nil {
 		config = DefaultConfig()
 	}
-
-	tarReader := tar.NewReader(reader)
-	tfs := &tarFs{
-		files:       make(map[string]*tarFsFile),
-		dirs:        make(map[string][]string),
-		config:      config,
-		archivePath: archivePath,
-		isGzip:      isGzip,
-		isBzip2:     isBzip2,
-		preloaded:   make(map[string]bool),
+	if err := config.validate(); err != nil {
+		return nil, err
 	}
-
-	// Initialize ARC cache if enabled
+	filesystem := &tarFs{
+		files: make(map[string]*fileEntry), dirs: make(map[string][]os.FileInfo),
+	}
 	if config.UseARCCache {
-		tfs.cache = newARCCache(config.ARCCacheSize)
+		filesystem.cache = newARCCache(config.ARCCacheSize)
 	}
-
-	// Build preload map for quick lookup
-	preloadMap := make(map[string]bool)
-	for _, p := range config.PreloadFiles {
-		preloadMap[normalizePath(p)] = true
+	preload := make(map[string]bool)
+	if config.UseARCCache {
+		for _, name := range config.PreloadFiles {
+			if strings.ContainsRune(name, '\x00') {
+				return nil, fmt.Errorf("tarfs: preload path: %w", fs.ErrInvalid)
+			}
+			preload[normalizePath(name)] = true
+		}
 	}
-
-	// Ensure root directory always exists
-	tfs.files["/"] = &tarFsFile{
-		fs:   tfs,
-		data: nil,
-		fileInfo: &tarFileInfo{
-			name:    "/",
-			size:    0,
-			mode:    0755 | fs.ModeDir,
-			modTime: time.Now(),
-			isDir:   true,
-		},
-		isDir:  true,
-		name:   "/",
-		cached: false,
-	}
-	tfs.dirs["/"] = []string{}
-
+	filesystem.files["/"] = directoryEntry("/", 0755, time.Time{})
+	tarReader := tar.NewReader(reader)
 	for {
-		fileHeader, err := tarReader.Next()
+		header, err := tarReader.Next()
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
 			return nil, err
 		}
-
-		if fileHeader.Name == "." {
+		if header.Typeflag == tar.TypeXGlobalHeader {
 			continue
 		}
-
-		// Clean and normalize path
-		cleanPath := normalizePath(fileHeader.Name)
-
-		// Skip non regular files and directories
-		if fileHeader.Typeflag == tar.TypeReg {
-			// Check if this file should be preloaded
-			isPreloaded := preloadMap[cleanPath]
-
-			// Read file data
-			data, err := io.ReadAll(tarReader)
-			if err != nil {
-				return nil, err
-			}
-
-			fileEntry := &tarFsFile{
-				fs: tfs,
-				fileInfo: &tarFileInfo{
-					name:    path.Base(cleanPath),
-					size:    fileHeader.Size,
-					mode:    fileHeader.FileInfo().Mode(),
-					modTime: fileHeader.ModTime,
-					isDir:   false,
-				},
-				isDir:  false,
-				name:   cleanPath,
-				cached: false,
-			}
-
-			// Handle file based on configuration
-			if isPreloaded {
-				// Preloaded files are always kept in memory
-				if shouldCompress(fileHeader.Size, config.LargeFileCompression) {
-					fileEntry.compressed = compressData(data, config.CompressionAlgorithm, config.CompressionLevel)
-				} else {
-					fileEntry.data = data
-				}
-				tfs.preloaded[cleanPath] = true
-			} else if config.UseARCCache {
-				// With ARC cache, only store metadata, data loaded on demand
-				fileEntry.cached = true
-				fileEntry.data = nil
-				if shouldCompress(fileHeader.Size, config.LargeFileCompression) {
-					compressed := compressData(data, config.CompressionAlgorithm, config.CompressionLevel)
-					fileEntry.compressed = compressed
-					// Store the actual data in cache for immediate availability
-					tfs.cache.Put(cleanPath, compressed.compressed)
-				} else {
-					fileEntry.compressed = wrapUncompressedData(data, fileHeader.Size)
-					tfs.cache.Put(cleanPath, data)
+		if header.Typeflag != tar.TypeReg && header.Typeflag != tar.TypeDir {
+			return nil, fmt.Errorf("tarfs: unsupported entry %q (type %d): %w", header.Name, header.Typeflag, fs.ErrInvalid)
+		}
+		if strings.ContainsRune(header.Name, '\x00') {
+			return nil, fmt.Errorf("tarfs: entry path: %w", fs.ErrInvalid)
+		}
+		name := normalizePath(header.Name)
+		isDir := header.Typeflag == tar.TypeDir
+		if old, exists := filesystem.files[name]; exists && old.fileInfo.IsDir() != isDir {
+			return nil, fmt.Errorf("tarfs: file/directory conflict at %q: %w", name, fs.ErrInvalid)
+		}
+		for parent := parentPath(name); ; parent = parentPath(parent) {
+			if entry, exists := filesystem.files[parent]; exists {
+				if !entry.fileInfo.IsDir() {
+					return nil, fmt.Errorf("tarfs: parent %q is a file: %w", parent, fs.ErrInvalid)
 				}
 			} else {
-				// No cache - load everything and optionally compress
-				if shouldCompress(fileHeader.Size, config.LargeFileCompression) {
-					fileEntry.compressed = compressData(data, config.CompressionAlgorithm, config.CompressionLevel)
-				} else {
-					fileEntry.data = data
-				}
+				filesystem.files[parent] = directoryEntry(parent, 0755, time.Time{})
 			}
-
-			tfs.files[cleanPath] = fileEntry
-
-		} else if fileHeader.Typeflag == tar.TypeDir {
-			tfs.files[cleanPath] = &tarFsFile{
-				fs:   tfs,
-				data: nil,
-				fileInfo: &tarFileInfo{
-					name:    path.Base(cleanPath),
-					size:    0,
-					mode:    fileHeader.FileInfo().Mode() | fs.ModeDir,
-					modTime: fileHeader.ModTime,
-					isDir:   true,
-				},
-				isDir:  true,
-				name:   cleanPath,
-				cached: false,
+			if parent == "/" {
+				break
 			}
 		}
-	}
-
-	// Ensure all parent directories exist
-	for filePath := range tfs.files {
-		dirPath := path.Dir(filePath)
-		for dirPath != "/" && dirPath != "." {
-			if _, exists := tfs.files[dirPath]; !exists {
-				tfs.files[dirPath] = &tarFsFile{
-					fs:   tfs,
-					data: nil,
-					fileInfo: &tarFileInfo{
-						name:    path.Base(dirPath),
-						size:    0,
-						mode:    0755 | fs.ModeDir,
-						modTime: time.Now(),
-						isDir:   true,
-					},
-					isDir: true,
-					name:  dirPath,
-				}
-			}
-			// Initialize directory entry if not exists
-			if _, exists := tfs.dirs[dirPath]; !exists {
-				tfs.dirs[dirPath] = []string{}
-			}
-			dirPath = path.Dir(dirPath)
+		if isDir {
+			filesystem.files[name] = directoryEntry(name, header.FileInfo().Mode(), header.ModTime)
+			continue
 		}
-	}
-
-	// Build directory listings - must be done after all directories exist
-	for filePath := range tfs.files {
-		dirPath := path.Dir(filePath)
-		if dirPath != filePath { // Don't add directory to itself
-			// Check if not already in the list
-			found := false
-			for _, existing := range tfs.dirs[dirPath] {
-				if existing == filePath {
-					found = true
-					break
-				}
+		data, err := io.ReadAll(tarReader)
+		if err != nil {
+			return nil, fmt.Errorf("tarfs: read %q: %w", name, err)
+		}
+		entry := &fileEntry{data: data, fileInfo: &tarFileInfo{
+			name: path.Base(name), size: header.Size, mode: header.FileInfo().Mode(), modTime: header.ModTime,
+		}}
+		// Preloads keep decoded bytes in the entry, outside ARC.
+		if !preload[name] && config.CompressionAlgorithm != CompressionNone && shouldCompress(header.Size, config.LargeFileCompression) {
+			compressed, err := compressData(data, config.CompressionAlgorithm, config.CompressionLevel)
+			if err != nil {
+				return nil, fmt.Errorf("tarfs: compress %q: %w", name, err)
 			}
-			if !found {
-				tfs.dirs[dirPath] = append(tfs.dirs[dirPath], filePath)
+			if compressed.isCompressed {
+				entry.data, entry.compressed = nil, compressed
 			}
 		}
+		// TAR permits repeated entries. The last entry of the same kind wins.
+		filesystem.files[name] = entry
 	}
-
-	return tfs, nil
+	for name := range preload {
+		entry, exists := filesystem.files[name]
+		if !exists {
+			return nil, &fs.PathError{Op: "preload", Path: name, Err: fs.ErrNotExist}
+		}
+		if entry.fileInfo.IsDir() {
+			return nil, &fs.PathError{Op: "preload", Path: name, Err: fs.ErrInvalid}
+		}
+	}
+	// Build once, without an O(n^2) duplicate scan. Consumers get copied slices.
+	for name, entry := range filesystem.files {
+		if entry.fileInfo.IsDir() {
+			filesystem.dirs[name] = nil
+		}
+	}
+	for name, entry := range filesystem.files {
+		if name != "/" {
+			parent := parentPath(name)
+			filesystem.dirs[parent] = append(filesystem.dirs[parent], entry.fileInfo)
+		}
+	}
+	for _, entries := range filesystem.dirs {
+		slices.SortFunc(entries, func(a, b os.FileInfo) int { return strings.Compare(a.Name(), b.Name()) })
+	}
+	return filesystem, nil
 }
 
-// Open file in tarfs and returns file handle
-func (tf *tarFs) Open(name string) (http.File, error) {
-	if filepath.Separator != '/' && strings.ContainsRune(name, filepath.Separator) ||
-		strings.Contains(name, "\x00") {
-		return nil, errors.New("invalid character in file path")
-	}
-
-	tf.mu.RLock()
-	defer tf.mu.RUnlock()
-
-	cleanPath := normalizePath(name)
-	f, ok := tf.files[cleanPath]
-	if !ok {
-		return nil, os.ErrNotExist
-	}
-
-	// Return a copy of the file handle to avoid race conditions
-	fileCopy := &tarFsFile{
-		fs:         tf,
-		data:       f.data,
-		compressed: f.compressed,
-		fileInfo:   f.fileInfo,
-		isDir:      f.isDir,
-		name:       f.name,
-		dirPos:     0,
-		readPos:    0,
-		cached:     f.cached,
-	}
-
-	return fileCopy, nil
+func directoryEntry(name string, mode fs.FileMode, modTime time.Time) *fileEntry {
+	return &fileEntry{fileInfo: &tarFileInfo{name: path.Base(name), mode: mode | fs.ModeDir, modTime: modTime}}
 }
 
-// Check if file exists in tarfs
-func (tf *tarFs) Exists(name string) bool {
-	if filepath.Separator != '/' && strings.ContainsRune(name, filepath.Separator) ||
-		strings.Contains(name, "\x00") {
+// Open returns an independent handle. Paths use a virtual root: leading slashes,
+// dot components and Windows backslashes are normalized on every platform.
+func (filesystem *tarFs) Open(name string) (http.File, error) {
+	if strings.ContainsRune(name, '\x00') {
+		return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrInvalid}
+	}
+	clean := normalizePath(name)
+	entry, exists := filesystem.files[clean]
+	if !exists {
+		return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrNotExist}
+	}
+	file := &tarFsFile{fs: filesystem, entry: entry, name: clean}
+	if entry.compressed == nil {
+		file.reader.Reset(entry.data)
+		file.loaded = true
+	}
+	return file, nil
+}
+
+// Exists reports whether a regular file or directory is present.
+func (filesystem *tarFs) Exists(name string) bool {
+	if strings.ContainsRune(name, '\x00') {
 		return false
 	}
-
-	tf.mu.RLock()
-	defer tf.mu.RUnlock()
-
-	_, ok := tf.files[normalizePath(name)]
-	return ok
+	_, exists := filesystem.files[normalizePath(name)]
+	return exists
 }
 
-// getData returns the actual file data, handling decompression and cache lookups
-func (f *tarFsFile) getData() ([]byte, error) {
-	// If data is already in memory, return it
-	if f.data != nil {
-		return f.data, nil
+// prepare decodes at most once per handle. ARC holds decoded bytes across opens;
+// the immutable compressed payload remains the filesystem's source of truth.
+func (file *tarFsFile) prepare() error {
+	if file.loaded {
+		return nil
 	}
-
-	// If cached, try to get from cache
-	if f.cached && f.fs.cache != nil {
-		cachedData := f.fs.cache.Get(f.name)
-		if cachedData != nil {
-			if f.compressed != nil && f.compressed.isCompressed {
-				cd := *f.compressed
-				cd.compressed = cachedData
-				return decompressData(&cd)
-			}
-			return cachedData, nil
+	var data []byte
+	if file.fs.cache != nil {
+		data = file.fs.cache.Get(file.name)
+		if data == nil {
+			// Serialize misses for this payload only; unrelated files decode
+			// concurrently and cache hits need no payload lock.
+			file.entry.compressed.decodeMu.Lock()
+			defer file.entry.compressed.decodeMu.Unlock()
+			data = file.fs.cache.Get(file.name)
 		}
 	}
-
-	if f.compressed != nil {
-		data, err := decompressData(f.compressed)
+	if data == nil {
+		var err error
+		data, err = decompressData(file.entry.compressed)
 		if err != nil {
-			return nil, err
+			return &fs.PathError{Op: "read", Path: file.name, Err: err}
 		}
-		// Repopulate cache so subsequent readers benefit
-		if f.cached && f.fs.cache != nil {
-			f.fs.cache.Put(f.name, f.compressed.compressed)
+		if file.fs.cache != nil {
+			file.fs.cache.Put(file.name, data)
 		}
-		return data, nil
 	}
-
-	return []byte{}, nil
-}
-
-// Read implements io.Reader for tarFsFile
-func (f *tarFsFile) Read(p []byte) (n int, err error) {
-	if f.isDir {
-		return 0, errors.New("is a directory")
-	}
-
-	// Get actual data (may need decompression or cache lookup)
-	data, err := f.getData()
-	if err != nil {
-		return 0, err
-	}
-
-	if f.readPos >= len(data) {
-		return 0, io.EOF
-	}
-	n = copy(p, data[f.readPos:])
-	f.readPos += n
-	return n, nil
-}
-
-// Seek implements io.Seeker for tarFsFile
-func (f *tarFsFile) Seek(offset int64, whence int) (int64, error) {
-	if f.isDir {
-		return 0, errors.New("is a directory")
-	}
-
-	var newPos int64
-	switch whence {
-	case io.SeekStart:
-		newPos = offset
-	case io.SeekCurrent:
-		newPos = int64(f.readPos) + offset
-	case io.SeekEnd:
-		newPos = f.fileInfo.size + offset
-	default:
-		return 0, errors.New("invalid whence")
-	}
-
-	if newPos < 0 {
-		return 0, errors.New("negative position")
-	}
-
-	f.readPos = int(newPos)
-	return newPos, nil
-}
-
-// Close file handle
-func (f *tarFsFile) Close() error {
+	position, _ := file.reader.Seek(0, io.SeekCurrent)
+	file.reader.Reset(data)
+	_, _ = file.reader.Seek(position, io.SeekStart) // position was already validated by Seek.
+	file.loaded = true
 	return nil
 }
 
-// Readdir returns directory entries
-func (f *tarFsFile) Readdir(count int) ([]os.FileInfo, error) {
-	if !f.isDir {
-		return nil, os.ErrNotExist
+func (file *tarFsFile) stateError(op string, directoryOperation bool) error {
+	if file.closed {
+		return &fs.PathError{Op: op, Path: file.name, Err: fs.ErrClosed}
 	}
-
-	f.fs.mu.RLock()
-	defer f.fs.mu.RUnlock()
-
-	entries, exists := f.fs.dirs[f.name]
-	if !exists {
-		return []os.FileInfo{}, nil
+	if file.entry.fileInfo.IsDir() != directoryOperation {
+		return &fs.PathError{Op: op, Path: file.name, Err: fs.ErrInvalid}
 	}
+	return nil
+}
 
-	// Convert paths to FileInfo
-	var fileInfos []os.FileInfo
-	for _, entryPath := range entries {
-		if entry, ok := f.fs.files[entryPath]; ok {
-			fileInfos = append(fileInfos, entry.fileInfo)
-		}
+func (file *tarFsFile) Read(data []byte) (int, error) {
+	file.mu.Lock()
+	defer file.mu.Unlock()
+	if err := file.stateError("read", false); err != nil {
+		return 0, err
 	}
-
-	// Handle count parameter
-	if count <= 0 {
-		return fileInfos, nil
+	if len(data) == 0 {
+		return 0, nil
 	}
+	if err := file.prepare(); err != nil {
+		return 0, err
+	}
+	return file.reader.Read(data)
+}
 
-	if f.dirPos >= len(fileInfos) {
+func (file *tarFsFile) Seek(offset int64, whence int) (int64, error) {
+	file.mu.Lock()
+	defer file.mu.Unlock()
+	if err := file.stateError("seek", false); err != nil {
+		return 0, err
+	}
+	// Seeking uses metadata and must not decode a payload, including for HEAD requests.
+	var base int64
+	switch whence {
+	case io.SeekStart:
+		base = 0
+	case io.SeekCurrent:
+		base, _ = file.reader.Seek(0, io.SeekCurrent)
+	case io.SeekEnd:
+		base = file.entry.fileInfo.Size()
+	default:
+		return 0, &fs.PathError{Op: "seek", Path: file.name, Err: fs.ErrInvalid}
+	}
+	position := base + offset
+	if position < 0 || (offset > 0 && position < base) {
+		return 0, &fs.PathError{Op: "seek", Path: file.name, Err: fs.ErrInvalid}
+	}
+	return file.reader.Seek(position, io.SeekStart)
+}
+
+// Close releases this handle's decoded data. Closing twice is harmless; subsequent
+// Read, Seek, Readdir and Stat calls return fs.ErrClosed.
+func (file *tarFsFile) Close() error {
+	file.mu.Lock()
+	defer file.mu.Unlock()
+	file.closed = true
+	file.reader.Reset(nil)
+	return nil
+}
+
+// Readdir returns the next count entries in lexical name order. For count <= 0,
+// it consumes all remaining entries. A positive read returns io.EOF only when no
+// entries remain, matching os.File.Readdir.
+func (file *tarFsFile) Readdir(count int) ([]os.FileInfo, error) {
+	file.mu.Lock()
+	defer file.mu.Unlock()
+	if err := file.stateError("readdir", true); err != nil {
+		return nil, err
+	}
+	entries := file.fs.dirs[file.name]
+	remaining := len(entries) - file.dirPos
+	if count > 0 && remaining == 0 {
 		return nil, io.EOF
 	}
-
-	end := f.dirPos + count
-	if end > len(fileInfos) {
-		end = len(fileInfos)
+	length := remaining
+	if count > 0 && count < length {
+		length = count
 	}
-
-	result := fileInfos[f.dirPos:end]
-	f.dirPos = end
-
-	if f.dirPos >= len(fileInfos) {
-		return result, io.EOF
-	}
-
+	result := make([]os.FileInfo, length)
+	copy(result, entries[file.dirPos:file.dirPos+length])
+	file.dirPos += length
 	return result, nil
 }
 
-// Stat returns file info
-func (f *tarFsFile) Stat() (os.FileInfo, error) {
-	return f.fileInfo, nil
+func (file *tarFsFile) Stat() (os.FileInfo, error) {
+	file.mu.Lock()
+	defer file.mu.Unlock()
+	if file.closed {
+		return nil, &fs.PathError{Op: "stat", Path: file.name, Err: fs.ErrClosed}
+	}
+	return file.entry.fileInfo, nil
 }
 
 func normalizePath(name string) string {
-	if name == "" {
+	if strings.ContainsRune(name, '\\') {
+		name = strings.ReplaceAll(name, "\\", "/")
+	}
+	if !strings.HasPrefix(name, "/") {
+		name = "/" + name
+	}
+	return path.Clean(name)
+}
+
+// name is already canonical. path.Dir would clean each successively shorter
+// prefix again, making a deeply nested archive quadratic in path depth.
+func parentPath(name string) string {
+	separator := strings.LastIndexByte(name, '/')
+	if separator <= 0 {
 		return "/"
 	}
-	clean := strings.ReplaceAll(name, "\\", "/")
-	if !strings.HasPrefix(clean, "/") {
-		clean = "/" + clean
-	}
-	clean = path.Clean(clean)
-	if clean == "." || clean == "" {
-		return "/"
-	}
-	return clean
+	return name[:separator]
 }

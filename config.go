@@ -1,68 +1,55 @@
 package tarfs
 
-// CompressionAlgorithm specifies the compression algorithm to use
+import "fmt"
+
+// CompressionAlgorithm selects the in-memory representation of file contents.
 type CompressionAlgorithm int
 
 const (
-	// CompressionNone disables compression
+	// CompressionNone keeps the original bytes, including with a nonzero threshold.
 	CompressionNone CompressionAlgorithm = iota
-	// CompressionDeflate uses DEFLATE algorithm (compress/flate)
 	CompressionDeflate
-	// CompressionGzip uses GZIP algorithm (compress/gzip)
 	CompressionGzip
-	// CompressionZlib uses ZLIB algorithm (compress/zlib)
 	CompressionZlib
 )
 
-// Config provides configuration options for TarFS
+// Config controls immutable payload storage and the optional decoded-file cache.
+// The filesystem does not retain Config or PreloadFiles after construction.
 type Config struct {
-	// LargeFileCompression specifies the minimum file size (in bytes) for compression.
-	// Files larger than this threshold will be compressed in memory.
-	// Set to 0 to disable compression (default).
+	// LargeFileCompression is the minimum size in bytes to attempt compression.
+	// Zero disables it. Use DefaultConfig to start with DEFLATE at level 5.
 	LargeFileCompression int64
-
-	// CompressionAlgorithm specifies which compression algorithm to use.
-	// Options: CompressionDeflate (default), CompressionGzip, CompressionZlib
-	// Only used when LargeFileCompression > 0.
+	// CompressionAlgorithm is only used when LargeFileCompression is positive.
+	// The zero value, CompressionNone, explicitly disables compression.
 	CompressionAlgorithm CompressionAlgorithm
-
-	// CompressionLevel specifies the compression level (1-9).
-	// 1 = fastest/least compression, 9 = slowest/best compression
-	// Special values:
-	//   flate.DefaultCompression (-1) = default level (6)
-	//   flate.NoCompression (0) = no compression
-	//   flate.BestSpeed (1) = fastest
-	//   flate.BestCompression (9) = best compression
-	// Default: 5 (good balance between speed and compression ratio)
-	// Only used when LargeFileCompression > 0.
+	// CompressionLevel accepts -2 (Huffman only), -1 (standard default), 0 (no
+	// compression), and 1 through 9. DefaultConfig selects 5.
 	CompressionLevel int
-
-	// UseARCCache enables the Adaptive Replacement Cache for file data.
-	// When enabled, files are loaded on-demand and cached using an ARC algorithm
-	// which balances between recently and frequently used items.
-	// When disabled, all files are loaded into memory at initialization.
+	// UseARCCache retains decoded compressed files across opens. All source
+	// payloads remain in memory; this is not disk-backed or lazy archive loading.
 	UseARCCache bool
-
-	// ARCCacheSize specifies the maximum number of files to keep in the ARC cache.
-	// Only used when UseARCCache is true.
-	// Default: 128
+	// ARCCacheSize bounds the number of decoded files, not their bytes. Zero uses
+	// 128; negative values are invalid when the cache is enabled.
 	ARCCacheSize int
-
-	// PreloadFiles is a list of file paths that should be loaded immediately
-	// and kept in memory permanently (not subject to cache eviction).
-	// Only used when UseARCCache is true.
-	// These files bypass the cache and remain in memory always.
+	// PreloadFiles pins decoded files outside ARC. Only used with UseARCCache.
+	// Missing files and directory names are errors. Entries are virtual paths.
 	PreloadFiles []string
 }
 
-// DefaultConfig returns a Config with default values
+// DefaultConfig disables compression and caching, with settings ready for opt-in.
 func DefaultConfig() *Config {
-	return &Config{
-		LargeFileCompression: 0,
-		CompressionAlgorithm: CompressionDeflate,
-		CompressionLevel:     5, // Good balance between speed and compression
-		UseARCCache:          false,
-		ARCCacheSize:         128,
-		PreloadFiles:         []string{},
+	return &Config{CompressionAlgorithm: CompressionDeflate, CompressionLevel: 5, ARCCacheSize: 128}
+}
+
+func (config *Config) validate() error {
+	if config.LargeFileCompression < 0 {
+		return fmt.Errorf("tarfs: negative compression threshold")
 	}
+	if config.UseARCCache && config.ARCCacheSize < 0 {
+		return fmt.Errorf("tarfs: negative cache capacity")
+	}
+	if config.LargeFileCompression > 0 {
+		return validateCompression(config.CompressionAlgorithm, config.CompressionLevel)
+	}
+	return nil
 }

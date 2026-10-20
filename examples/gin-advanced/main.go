@@ -4,7 +4,7 @@ import (
 	"log"
 	"net/http"
 
-	"github.com/digitaldata-cz/tarfs"
+	"github.com/digitaldata-cz/tarfs/v2"
 	"github.com/gin-gonic/gin"
 )
 
@@ -14,9 +14,11 @@ func main() {
 		// Compress files larger than 10KB in memory
 		// Saves memory for large HTML/JS/CSS files
 		LargeFileCompression: 10 * 1024, // 10KB threshold
+		CompressionAlgorithm: tarfs.CompressionDeflate,
+		CompressionLevel:     5,
 
 		// Enable ARC cache for efficient memory usage
-		// Only keep frequently accessed files in memory
+		// Retain decoded compressed files across opens
 		UseARCCache: true,
 
 		// Cache up to 100 files
@@ -51,11 +53,11 @@ func main() {
 	// Stats endpoint to show configuration
 	r.GET("/stats", func(c *gin.Context) {
 		c.JSON(200, gin.H{
-			"compression_enabled": config.LargeFileCompression > 0,
+			"compression_enabled":   config.LargeFileCompression > 0,
 			"compression_threshold": config.LargeFileCompression,
-			"arc_cache_enabled": config.UseARCCache,
-			"arc_cache_size": config.ARCCacheSize,
-			"preloaded_files": config.PreloadFiles,
+			"arc_cache_enabled":     config.UseARCCache,
+			"arc_cache_size":        config.ARCCacheSize,
+			"preloaded_files":       config.PreloadFiles,
 		})
 	})
 
