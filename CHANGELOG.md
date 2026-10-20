@@ -2,6 +2,45 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.0.1] - 2026-10-20
+
+### Fixed
+
+- Correct v2 Go module/import identity: `github.com/digitaldata-cz/tarfs/v2`.
+  The existing v2.0.0 tag is not rewritten; its original module declaration
+  cannot be consumed as a valid v2 Go module.
+- Independent, synchronized file handles; closed-handle errors, checked seeks,
+  consistent virtual paths on Windows, and correct sorted directory pagination.
+- File/directory namespace conflicts, truncated content and gzip/bzip2 trailer
+  validation now fail explicitly. Unsupported special TAR entries are errors.
+- Invalid enabled compression settings return errors instead of silently
+  changing storage behavior. Missing/directory preloads are also errors.
+- ARC adaptation ratios, stale eviction bookkeeping and linear ghost-list scans.
+
+### Performance
+
+- Decode compressed assets once per handle; cache decoded bytes across opens.
+- Coalesce concurrent cache misses for one asset, and pin preloads decoded.
+- Pre-size decoded buffers, avoid expanding incompressible assets, index
+  directory metadata once, and remove quadratic sibling/deep-parent scans.
+- Remove unused archive/lazy-loading state and unnecessary filesystem locks.
+- Add reproducible streaming, pagination, indexing and parallel-read benchmarks;
+  measured results and limits are in PERFORMANCE.md.
+
+### Verification and documentation
+
+- Add HTTP range/HEAD and concurrency regressions, malformed-archive and
+  configuration tests, ARC invariants, and archive/compression fuzz targets.
+- CI checks current Go on Linux/Windows/macOS, minimum Go 1.22 on Linux/Windows,
+  nested Gin examples, fuzzing and security analysis. The core stays dependency-free.
+- Update Gin examples and their dependencies; examples use the local v2 module.
+- Correct the old claims of disk-backed lazy loading and universal memory-saving
+  percentages. ARC retains decoded payloads in addition to the source archive data.
+
+Historical v2.0.0 notes below record the original feature description. Their
+lazy-loading and fixed memory-saving claims were incorrect; use the current
+README and PERFORMANCE.md for actual behavior.
+
 ## [2.0.0] - 2025-10-05
 
 ### Added

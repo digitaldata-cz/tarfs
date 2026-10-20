@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-func buildTar(t *testing.T, files map[string]string) *bytes.Buffer {
+func buildTar(t testing.TB, files map[string]string) *bytes.Buffer {
 	t.Helper()
 
 	buf := new(bytes.Buffer)
@@ -133,37 +133,12 @@ func TestARCReadAfterEviction(t *testing.T) {
 	}
 }
 
-func TestCompressionFallbackWhenCompressionFails(t *testing.T) {
-	files := map[string]string{
-		"large.txt": strings.Repeat("fallback", 512),
-	}
-	buf := buildTar(t, files)
-
-	config := &Config{
-		UseARCCache:          true,
-		ARCCacheSize:         2,
-		LargeFileCompression: 1,
-		CompressionAlgorithm: CompressionDeflate,
-		CompressionLevel:     20, // invalid level forces compressData to skip compression
-	}
-
-	fs, err := NewFromReaderWithConfig(bytes.NewReader(buf.Bytes()), config)
-	if err != nil {
-		t.Fatalf("NewFromReaderWithConfig: %v", err)
-	}
-
-	for i := 0; i < 2; i++ {
-		f, err := fs.Open("large.txt")
-		if err != nil {
-			t.Fatalf("Open large.txt (iter %d): %v", i, err)
-		}
-		payload, err := io.ReadAll(f)
-		f.Close()
-		if err != nil {
-			t.Fatalf("ReadAll large.txt (iter %d): %v", i, err)
-		}
-		if string(payload) != files["large.txt"] {
-			t.Fatalf("unexpected payload (iter %d)", i)
-		}
+func TestInvalidCompressionLevelFailsConstruction(t *testing.T) {
+	config := DefaultConfig()
+	config.LargeFileCompression = 1
+	config.UseARCCache = true
+	config.CompressionLevel = 20
+	if _, err := NewFromReaderWithConfig(buildTar(t, map[string]string{"file": "data"}), config); err == nil {
+		t.Fatal("invalid compression level accepted")
 	}
 }

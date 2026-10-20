@@ -3,7 +3,7 @@ package main
 import (
 	"net/http"
 
-	"github.com/digitaldata-cz/tarfs"
+	"github.com/digitaldata-cz/tarfs/v2"
 	"github.com/gin-gonic/gin"
 )
 

@@ -5,143 +5,108 @@ import (
 	"compress/flate"
 	"compress/gzip"
 	"compress/zlib"
+	"fmt"
 	"io"
+	"sync"
 )
 
-// compressedData holds compressed file data with metadata
 type compressedData struct {
+	decodeMu     sync.Mutex // Coalesces concurrent cache misses for this payload.
 	compressed   []byte
 	originalSize int64
 	isCompressed bool
-	algorithm    CompressionAlgorithm // Store algorithm for decompression
+	algorithm    CompressionAlgorithm
 }
 
-// compressData compresses data using the specified algorithm and level
-func compressData(data []byte, algorithm CompressionAlgorithm, level int) *compressedData {
-	if len(data) == 0 {
-		return &compressedData{
-			compressed:   []byte{},
-			originalSize: 0,
-			isCompressed: false,
-			algorithm:    algorithm,
-		}
+func compressData(data []byte, algorithm CompressionAlgorithm, level int) (*compressedData, error) {
+	if err := validateCompression(algorithm, level); err != nil {
+		return nil, err
 	}
-
-	var buf bytes.Buffer
-	var w io.WriteCloser
+	result := &compressedData{compressed: data, originalSize: int64(len(data)), algorithm: algorithm}
+	if len(data) == 0 || algorithm == CompressionNone {
+		return result, nil
+	}
+	var buffer bytes.Buffer
+	var writer io.WriteCloser
 	var err error
-
-	// Create appropriate writer based on algorithm
 	switch algorithm {
 	case CompressionDeflate:
-		w, err = flate.NewWriter(&buf, level)
+		writer, err = flate.NewWriter(&buffer, level)
 	case CompressionGzip:
-		w, err = gzip.NewWriterLevel(&buf, level)
+		writer, err = gzip.NewWriterLevel(&buffer, level)
 	case CompressionZlib:
-		w, err = zlib.NewWriterLevel(&buf, level)
-	default:
-		// Unknown algorithm, return uncompressed
-		return &compressedData{
-			compressed:   data,
-			originalSize: int64(len(data)),
-			isCompressed: false,
-			algorithm:    algorithm,
-		}
+		writer, err = zlib.NewWriterLevel(&buffer, level)
 	}
-
-	// Handle errors and write data (common code for all algorithms)
-	if err != nil {
-		return &compressedData{
-			compressed:   data,
-			originalSize: int64(len(data)),
-			isCompressed: false,
-			algorithm:    algorithm,
-		}
-	}
-	defer w.Close()
-
-	if _, err := w.Write(data); err != nil {
-		return &compressedData{
-			compressed:   data,
-			originalSize: int64(len(data)),
-			isCompressed: false,
-			algorithm:    algorithm,
-		}
-	}
-
-	if err := w.Close(); err != nil {
-		return &compressedData{
-			compressed:   data,
-			originalSize: int64(len(data)),
-			isCompressed: false,
-			algorithm:    algorithm,
-		}
-	}
-
-	compressed := buf.Bytes()
-
-	return &compressedData{
-		compressed:   compressed,
-		originalSize: int64(len(data)),
-		isCompressed: true,
-		algorithm:    algorithm,
-	}
-}
-
-func wrapUncompressedData(data []byte, size int64) *compressedData {
-	if data == nil {
-		data = []byte{}
-	}
-	return &compressedData{
-		compressed:   data,
-		originalSize: size,
-		isCompressed: false,
-		algorithm:    CompressionNone,
-	}
-}
-
-// decompressData decompresses data using the stored algorithm
-func decompressData(cd *compressedData) ([]byte, error) {
-	if !cd.isCompressed {
-		return cd.compressed, nil
-	}
-
-	if len(cd.compressed) == 0 {
-		return []byte{}, nil
-	}
-
-	var r io.ReadCloser
-	var err error
-
-	// Create appropriate reader based on algorithm
-	switch cd.algorithm {
-	case CompressionDeflate:
-		r = flate.NewReader(bytes.NewReader(cd.compressed))
-	case CompressionGzip:
-		r, err = gzip.NewReader(bytes.NewReader(cd.compressed))
-		if err != nil {
-			return nil, err
-		}
-	case CompressionZlib:
-		r, err = zlib.NewReader(bytes.NewReader(cd.compressed))
-		if err != nil {
-			return nil, err
-		}
-	default:
-		// Unknown algorithm, return compressed data as-is
-		return cd.compressed, nil
-	}
-	defer r.Close()
-
-	decompressed, err := io.ReadAll(r)
 	if err != nil {
 		return nil, err
 	}
-
-	return decompressed, nil
+	if _, err = writer.Write(data); err != nil {
+		_ = writer.Close()
+		return nil, err
+	}
+	if err = writer.Close(); err != nil {
+		return nil, err
+	}
+	// Compression is a storage optimization, not a reason to enlarge an asset.
+	if buffer.Len() < len(data) {
+		result.compressed = buffer.Bytes()
+		result.isCompressed = true
+	}
+	return result, nil
 }
 
-// shouldCompress determines if a file should be compressed based on size threshold
-func shouldCompress(size int64, threshold int64) bool {
-	return threshold > 0 && size >= threshold
+func decompressData(data *compressedData) ([]byte, error) {
+	if data == nil {
+		return nil, fmt.Errorf("tarfs: missing compressed payload")
+	}
+	if !data.isCompressed {
+		if int64(len(data.compressed)) != data.originalSize {
+			return nil, fmt.Errorf("tarfs: payload size mismatch")
+		}
+		return data.compressed, nil
+	}
+	if data.originalSize < 0 || uint64(data.originalSize) >= uint64(^uint(0)>>1) {
+		return nil, fmt.Errorf("tarfs: invalid decoded size")
+	}
+	var reader io.ReadCloser
+	var err error
+	switch data.algorithm {
+	case CompressionDeflate:
+		reader = flate.NewReader(bytes.NewReader(data.compressed))
+	case CompressionGzip:
+		reader, err = gzip.NewReader(bytes.NewReader(data.compressed))
+	case CompressionZlib:
+		reader, err = zlib.NewReader(bytes.NewReader(data.compressed))
+	default:
+		return nil, fmt.Errorf("tarfs: unknown compression algorithm %d", data.algorithm)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer reader.Close()
+	// originalSize is the length of bytes already loaded and compressed by
+	// this package. Allocate once; growing ReadAll buffers copied every asset.
+	decoded := make([]byte, int(data.originalSize))
+	if _, err := io.ReadFull(reader, decoded); err != nil {
+		return nil, err
+	}
+	var extra [1]byte
+	if n, err := io.ReadFull(reader, extra[:]); n != 0 {
+		return nil, fmt.Errorf("tarfs: decoded size exceeds %d", data.originalSize)
+	} else if err != io.EOF {
+		return nil, err
+	}
+	return decoded, nil
+}
+
+func shouldCompress(size, threshold int64) bool { return threshold > 0 && size >= threshold }
+
+func validateCompression(algorithm CompressionAlgorithm, level int) error {
+	if algorithm < CompressionNone || algorithm > CompressionZlib {
+		return fmt.Errorf("tarfs: unknown compression algorithm %d", algorithm)
+	}
+	if algorithm != CompressionNone && (level < flate.HuffmanOnly || level > flate.BestCompression) {
+		return fmt.Errorf("tarfs: invalid compression level %d", level)
+	}
+	return nil
 }

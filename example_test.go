@@ -5,7 +5,7 @@ import (
 	"log"
 	"net/http"
 
-	"github.com/digitaldata-cz/tarfs"
+	"github.com/digitaldata-cz/tarfs/v2"
 )
 
 // Example demonstrates basic usage of TarFS with HTTP server

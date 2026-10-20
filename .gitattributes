@@ -1,0 +1,11 @@
+* text=auto
+*.go text eol=lf
+*.yml text eol=lf
+*.md text eol=lf
+*.sh text eol=lf
+go.mod text eol=lf
+go.sum text eol=lf
+go.work text eol=lf
+go.work.sum text eol=lf
+*.bz2 binary
+*.png binary

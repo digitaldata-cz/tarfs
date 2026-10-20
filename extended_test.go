@@ -198,8 +198,8 @@ func TestReaddirPagination(t *testing.T) {
 
 	// Read remaining files
 	files3, err := f.Readdir(10)
-	if err != io.EOF {
-		t.Errorf("Expected EOF, got %v", err)
+	if err != nil {
+		t.Errorf("Expected successful final page, got %v", err)
 	}
 	if len(files3) != 4 {
 		t.Errorf("Expected 4 files, got %d", len(files3))

@@ -6,7 +6,7 @@ import (
 	"io"
 	"log"
 
-	"github.com/digitaldata-cz/tarfs"
+	"github.com/digitaldata-cz/tarfs/v2"
 )
 
 // Example showing different compression algorithms
@@ -55,18 +55,21 @@ func ExampleConfig_compressionAlgorithms() {
 func ExampleConfig_compressionLevels() {
 	// Fast compression - good for development/testing
 	fastConfig := &tarfs.Config{
+		CompressionAlgorithm: tarfs.CompressionDeflate,
 		LargeFileCompression: 30 * 1024,
 		CompressionLevel:     flate.BestSpeed, // Level 1
 	}
 
 	// Balanced compression - good for production (default)
 	balancedConfig := &tarfs.Config{
+		CompressionAlgorithm: tarfs.CompressionDeflate,
 		LargeFileCompression: 50 * 1024,
 		CompressionLevel:     5, // Default
 	}
 
 	// Best compression - good when memory is critical
 	bestConfig := &tarfs.Config{
+		CompressionAlgorithm: tarfs.CompressionDeflate,
 		LargeFileCompression: 50 * 1024,
 		CompressionLevel:     flate.BestCompression, // Level 9
 	}

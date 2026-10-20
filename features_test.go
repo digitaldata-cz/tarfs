@@ -47,6 +47,8 @@ func TestCompression(t *testing.T) {
 
 	// Test with compression enabled
 	config := &Config{
+		CompressionAlgorithm: CompressionDeflate,
+		CompressionLevel:     5,
 		LargeFileCompression: 10 * 1024, // 10KB threshold
 		UseARCCache:          false,
 	}
@@ -217,14 +219,12 @@ func TestPreloadFiles(t *testing.T) {
 
 	tfs := fs.(*tarFs)
 
-	// Verify preload.txt is marked as preloaded
-	if !tfs.preloaded["/preload.txt"] {
-		t.Error("preload.txt should be marked as preloaded")
+	// A preload remains directly readable without populating the decoded cache.
+	if entry := tfs.files["/preload.txt"]; entry.compressed != nil || !bytes.Equal(entry.data, preloadData) {
+		t.Fatal("preload is not decoded")
 	}
-
-	// Verify normal.txt is not preloaded
-	if tfs.preloaded["/normal.txt"] {
-		t.Error("normal.txt should not be marked as preloaded")
+	if tfs.cache.Len() != 0 {
+		t.Fatal("preload consumed an ARC slot")
 	}
 
 	// Both files should be accessible
@@ -270,6 +270,8 @@ func TestCompressionWithCache(t *testing.T) {
 
 	// Enable both compression and caching
 	config := &Config{
+		CompressionAlgorithm: CompressionDeflate,
+		CompressionLevel:     5,
 		LargeFileCompression: 10 * 1024,
 		UseARCCache:          true,
 		ARCCacheSize:         128,

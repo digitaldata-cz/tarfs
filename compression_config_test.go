@@ -31,7 +31,10 @@ func TestCompressionAlgorithms(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Compress
-			compressed := compressData(data, tt.algorithm, tt.level)
+			compressed, err := compressData(data, tt.algorithm, tt.level)
+			if err != nil {
+				t.Fatal(err)
+			}
 			if !compressed.isCompressed {
 				t.Error("Data should be compressed")
 			}
@@ -74,7 +77,10 @@ func TestCompressionLevels(t *testing.T) {
 	results := make(map[int]int)
 
 	for _, level := range levels {
-		compressed := compressData(data, CompressionDeflate, level)
+		compressed, err := compressData(data, CompressionDeflate, level)
+		if err != nil {
+			t.Fatal(err)
+		}
 		results[level] = len(compressed.compressed)
 
 		// Verify decompression works
@@ -225,15 +231,7 @@ func TestDefaultCompressionConfig(t *testing.T) {
 
 // Test compression with invalid algorithm
 func TestCompressionInvalidAlgorithm(t *testing.T) {
-	data := []byte("test data")
-	compressed := compressData(data, CompressionAlgorithm(999), 5)
-
-	// Should return uncompressed
-	if compressed.isCompressed {
-		t.Error("Invalid algorithm should not compress")
-	}
-
-	if !bytes.Equal(compressed.compressed, data) {
-		t.Error("Invalid algorithm should return original data")
+	if _, err := compressData([]byte("test data"), CompressionAlgorithm(999), 5); err == nil {
+		t.Fatal("invalid algorithm accepted")
 	}
 }
